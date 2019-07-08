@@ -3,6 +3,7 @@ This is a simple market making strategy to demonstrate use of the Gryphon
 framework. It follows the same tick-logic as SuperSimpleMarketMaking, but it's target
 exchange, spread, and base volume, are all configurable.
 """
+import datetime
 
 from cdecimal import Decimal
 
@@ -12,10 +13,24 @@ from gryphon.lib.money import Money
 from gryphon.lib.exchange.consts import Consts
 from gryphon.lib.metrics import midpoint as midpoint_lib
 
+import logging
+import logging.handlers
+
 
 class DynamicMarketMaking(Strategy):
     def __init__(self, db, harness, strategy_configuration):
         super(DynamicMarketMaking, self).__init__(db, harness)
+
+        self.logger = logging.getLogger(__name__)
+
+        handler = logging.handlers.RotatingFileHandler('dynamic_market_making.' + datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + '.log')
+        formatter = logging.Formatter(
+            '%(asctime)s %(name)-12s %(levelname)-8s %(message)s')
+        handler.setFormatter(formatter)
+        self.logger.addHandler(handler)
+        self.logger.setLevel(logging.DEBUG)
+
+        self.logger.debug("--Strategy Init--")
 
         # Configurable properties with defaults.
         self.spread = Decimal('0.01')
@@ -30,6 +45,7 @@ class DynamicMarketMaking(Strategy):
     def configure(self, strategy_configuration):
         super(DynamicMarketMaking, self).configure(strategy_configuration)
 
+        self.logger.debug("--Strategy Configure--")
         self.init_configurable('spread', strategy_configuration)
         self.init_configurable('base_volume', strategy_configuration)
         self.init_configurable('exchange', strategy_configuration)
@@ -49,7 +65,8 @@ class DynamicMarketMaking(Strategy):
 
     def tick(self, current_orders):
 
-        print(current_orders)
+        self.logger.debug("--Strategy Tick--")
+        self.logger.info("Current Orders: " + str(current_orders))
         # Question : Can we detect fulfilled orders ?
         # upon fulfilled order we can increase spread base on volatility
         # otherwise we should probably decrease spread to get order fulfilled....
@@ -67,7 +84,7 @@ class DynamicMarketMaking(Strategy):
         # SAFETY
         if (hasattr(self, 'last_ask_price') and self.last_ask_price < self.midpoint) or (hasattr(self, 'last_bid_price') and self.last_bid_price > self.midpoint):
             # spread was not high enough ! We likely lost money here -> correct quickly
-            print("HIGH VOLATILITY encountered -> adjusting spread")
+            self.logger.warning("HIGH VOLATILITY encountered -> adjusting spread")
             self.spread *= self.spread_coef_on_loss
             #TODO : maybe terminate instead, with advice to change spread ? by some amount ?
 
@@ -91,8 +108,8 @@ class DynamicMarketMaking(Strategy):
         # for constant tick period, we need increased spread, and reduced base_volume
         self.spread = self.spread_adjust_coef * (self.volat - self.last_volat) + self.spread  # adjusting spread relative to volatility
 
-        print("Volatility: " + str(self.volat))
-        print("Spread: " + str(self.spread))
+        self.logger.info("Volatility: " + str(self.volat))
+        self.logger.info("Spread: " + str(self.spread))
 
         # Base volume increase means increased risk (maybe more than spread decrease).
         # We want to increase base volume when volatility doesnt change 'much'...
@@ -114,9 +131,9 @@ class DynamicMarketMaking(Strategy):
             self.base_volume,
             self.position,
         )
-        print("balance: " + str(self.primary_exchange.get_balance()))
-        print("bid volume: " + str(bid_volume) + " price: " + str(bid_price))
-        print("ask volume: " + str(ask_volume) + " price: " + str(ask_price))
+        self.logger.info("balance: " + str(self.primary_exchange.get_balance()))
+        self.logger.info("bid volume: " + str(bid_volume) + " price: " + str(bid_price))
+        self.logger.info("ask volume: " + str(ask_volume) + " price: " + str(ask_price))
 
         # TODO : take fees into account to remain profitable
         placeable_bid = self.primary_exchange.get_balance().get(bid_price.currency).amount > bid_price.amount * bid_volume.amount

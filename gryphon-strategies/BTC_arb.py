@@ -2,6 +2,8 @@ from gryphon.execution.strategies.base import Strategy
 from gryphon.lib import arbitrage as arb
 from gryphon.lib.exchange.consts import Consts
 
+import logging.handlers
+
 
 class BTCArb(Strategy):
 
@@ -9,10 +11,25 @@ class BTCArb(Strategy):
         self.done = False
         super(BTCArb, self).__init__(db, harness, strategy_configuration)
 
+        self.logger = logging.getLogger(__name__)
+
+        handler = logging.handlers.RotatingFileHandler('BTC_arb.log')
+        formatter = logging.Formatter(
+            '%(asctime)s %(name)-12s %(levelname)-8s %(message)s')
+        handler.setFormatter(formatter)
+        self.logger.addHandler(handler)
+        self.logger.setLevel(logging.DEBUG)
+
+        self.logger.debug("--Strategy Init--")
+
     def tick(self, open_orders):
-        btc_crosses = arb.detect_crosses_between_many_orderbooks(
-            [self.harness.kraken_btc_eur.get_orderbook(),
-             self.harness.bitstamp_btc_usd.get_orderbook(),]
+
+        self.logger.debug("--Strategy Tick--")
+        self.logger.info("Current Orders: " + str(open_orders))
+
+        btc_crosses = arb.detect_cross(
+            self.harness.bitstamp_btc_usd.get_orderbook(),
+             self.harness.bitstamp_btc_eur.get_orderbook()
         )
 
         for cross in btc_crosses:
