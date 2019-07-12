@@ -3,6 +3,7 @@ This is a simple investing strategy to demonstrate use of the Gryphon
 framework.
 """
 import datetime
+import functools
 import random
 import uuid
 from collections import OrderedDict
@@ -14,6 +15,8 @@ from gryphon.lib import market_making as mm
 from gryphon.lib.money import Money
 from gryphon.lib.exchange.consts import Consts
 from gryphon.lib.metrics import midpoint as midpoint_lib
+
+from gryphon.lib.metrics import quote as quote_lib
 
 import logging
 import logging.handlers
@@ -105,12 +108,13 @@ class Order(object):
         self.volume = volume
         self.volume_filled = Money('0', currency=volume.currency)
 
-    def fill(self, volume):
+    def fill(self, volume=None):
         """
         filling an order, partially or totally
-        :param volume:
+        :param volume: the volume used to fill this order
         :return: volume remaining after filling this order.
         """
+        volume = self.volume if volume is None else volume
         self.volume_filled += min(self.volume-self.volume_filled, volume)
         return volume - min(self.volume-self.volume_filled, volume)
 
@@ -124,14 +128,14 @@ class Order(object):
 
 class MarketOrder(Order):
     def __init__(self, mode, id, price, volume):
-        self.price = price  # only because market order require it in gryphon (https://github.com/garethdmm/gryphon/issues/52)
+        self.price = price  # because we need it to estimate our position before order is filled...
         super(MarketOrder, self).__init__(mode, id, volume)
 
     def gryphon(self):
         return self  # TODO : gryphon format
 
     def __str__(self):
-        return super(MarketOrder, self).__str__() + " @ " + str(self.price)
+        return super(MarketOrder, self).__str__()
 
 
 class LimitOrder(Order):
@@ -153,61 +157,126 @@ class Desk(object):
         self.exchange = exchange
         self.logger = logger
 
+        self.ob = self.exchange.get_orderbook()
         self.orders_passed = OrderedDict()
 
         self.min_order_size = self.exchange.exchange_wrapper.min_order_size
 
-    def _place_order(self, callable_order_type, mode, volume, price):
-        if volume > self.min_order_size:
-            order = callable_order_type(mode, volume, price)
-            if order:
-                if callable_order_type == self.exchange.limit_order:
-                    msg = "Limit Order"
-                elif callable_order_type == self.exchange.market_order:
-                    msg = "Market Order"
-                else:
-                    msg = "Unknown Order"
-
-                if not order.get('success'):
-                    self.logger.error(msg + " cannot be placed !")
-                    return None
-            else:
-                assert not self.harness.execute
-                pass  # dry-run
-
-            # assign id, even if harness doesnt give us anything
-            oid = order.get('order_id') if order else str(uuid.uuid4())[:8]
-
-            # Store order for this run even if we do not execute, to be abel to test strategy over multiple ticks
-            if callable_order_type == self.exchange.limit_order:
-                order = LimitOrder(mode=mode, id=oid, price=price, volume=volume)
-            elif callable_order_type == self.exchange.market_order:
-                order = MarketOrder(mode=mode, id=oid, price=price, volume=volume)
-
-            self.orders_passed[order.id] = order
-            return order
-
-        else:
-            self.logger.warning("Volume " + str(volume) + " too low, CANNOT buy !")
+    # def _place_order(self, callable_order_type, mode, volume, price):
+    #     if volume > self.min_order_size:
+    #         order = callable_order_type(mode=mode, volume=volume, price=price)
+    #         if order:
+    #             if callable_order_type == self.exchange.limit_order:
+    #                 msg = "Limit Order"
+    #             elif callable_order_type == self.exchange.market_order:
+    #                 msg = "Market Order"
+    #             else:
+    #                 msg = "Unknown Order"
+    #
+    #             if not order.get('success'):
+    #                 self.logger.error(msg + " cannot be placed !")
+    #                 return None
+    #         else:
+    #             assert not self.harness.execute
+    #             pass  # dry-run
+    #
+    #         # assign id, even if harness doesnt give us anything
+    #         oid = order.get('order_id') if order else str(uuid.uuid4())[:8]
+    #
+    #         # Store order for this run even if we do not execute, to be able to test strategy over multiple ticks
+    #         if callable_order_type == self.exchange.limit_order:
+    #             order = LimitOrder(mode=mode, id=oid, price=price, volume=volume)
+    #         elif callable_order_type == self.exchange.market_order:
+    #             order = MarketOrder(mode=mode, id=oid, price=price, volume=volume)
+    #
+    #         self.orders_passed[order.id] = order
+    #         return order
+    #
+    #     else:
+    #         self.logger.warning("Volume " + str(volume) + " too low, CANNOT buy !")
 
     def limit_bid(self, bid_volume, bid_price):
-        order = self._place_order(self.exchange.limit_order, Consts.BID, bid_volume, bid_price)
+        order = self.exchange.limit_order(Consts.BID, bid_volume, bid_price)
+        if order:
+            if not order.get('success'):
+                self.logger.error("Limit Order cannot be placed !")
+                return None
+        elif bid_volume < self.min_order_size:
+            return None
+        else:
+            assert not self.harness.execute
+            pass  # dry-run
+
+        # assign id, even if harness doesnt give us anything
+        oid = order.get('order_id') if order else str(uuid.uuid4())[:8]
+
+        # Store order for this run even if we do not execute, to be able to test strategy over multiple ticks
+        order = LimitOrder(mode=Consts.BID, id=oid, price=bid_price, volume=bid_volume)
+        self.orders_passed[order.id] = order
         return order
 
-    def market_bid(self, bid_volume, bid_price):
-        order = self._place_order(self.exchange.market_order, Consts.BID, bid_volume, bid_price)
+    def market_bid(self, bid_volume):
+        order = self.exchange.market_order(Consts.BID, bid_volume)
+        if order:
+            if not order.get('success'):
+                self.logger.error("Market Order cannot be placed !")
+                return None
+        elif bid_volume < self.min_order_size:
+            return None
+        else:
+            assert not self.harness.execute
+            pass  # dry-run
+        # assign id, even if harness doesnt give us anything
+        oid = order.get('order_id') if order else str(uuid.uuid4())[:8]
+        op = order.get('price') if order else quote_lib.price_quote_from_orderbook(self.ob, Consts.BID, bid_volume).get('price_for_order')
+
+        # Store order for this run even if we do not execute, to be able to test strategy over multiple ticks
+        order = MarketOrder(mode=Consts.BID, id=oid, volume=bid_volume, price=op)
+        self.orders_passed[order.id] = order
         return order
 
     def limit_ask(self, ask_volume, ask_price):
-        order = self._place_order(self.exchange.limit_order, Consts.ASK, ask_volume, ask_price)
+        order = self.exchange.limit_order(Consts.ASK, ask_volume, ask_price)
+        if order:
+            if not order.get('success'):
+                self.logger.error("Limit Order cannot be placed !")
+                return None
+        elif ask_volume < self.min_order_size:
+            return None
+        else:
+            assert not self.harness.execute
+            pass  # dry-run
+        # assign id, even if harness doesnt give us anything
+        oid = order.get('order_id') if order else str(uuid.uuid4())[:8]
+
+        # Store order for this run even if we do not execute, to be able to test strategy over multiple ticks
+        order = LimitOrder(mode=Consts.ASK, id=oid, price=ask_price, volume=ask_volume)
+        self.orders_passed[order.id] = order
         return order
 
-    def market_ask(self, ask_volume, ask_price):
-        order = self._place_order(self.exchange.market_order, Consts.ASK, ask_volume, ask_price)
+    def market_ask(self, ask_volume):
+        order = self.exchange.market_order(Consts.ASK, ask_volume)
+        if order:
+            if not order.get('success'):
+                self.logger.error("Market Order cannot be placed !")
+                return None
+        elif ask_volume < self.min_order_size:
+            return None
+        else:
+            assert not self.harness.execute
+            pass  # dry-run
+        # assign id, even if harness doesnt give us anything
+        oid = order.get('order_id') if order else str(uuid.uuid4())[:8]
+        op = order.get('price') if order else quote_lib.price_quote_from_orderbook(self.ob, Consts.ASK, ask_volume).get('price_for_order')
+
+        # Store order for this run even if we do not execute, to be able to test strategy over multiple ticks
+        order = MarketOrder(mode=Consts.ASK, id=oid, volume=ask_volume, price=op)
+        self.orders_passed[order.id] = order
         return order
 
     def cancel(self, order_id):
         # TODO : find order in passed list
+        # TODO : handle orders cancelled by harness...
         self.exchange.cancel_order(order_id=order_id)
         raise NotImplementedError
 
@@ -258,10 +327,12 @@ class Desk(object):
     def tick(self, current_orders, eaten_orders):
         # to keep track of order filling
 
+        self.ob = self.exchange.get_orderbook()
+
         if not self.harness.execute:
             for oid, o in self.orders_passed.items():
                 if not o.filled:
-                    # random fill
+                    # random fill  # TODO : check sim_exchange...
                     if random.random() > 0.5:
                         self.logger.warning("SIMULATING ORDER FILL: " + str(o))
                         # TODO :  better filling mock logic... limit order might NEVER get filled.
@@ -276,7 +347,7 @@ class Desk(object):
                 self.orders_passed[i].fill()
 
         # TODO : what happens on partial fills ?
-        return current_orders, eaten_orders
+        return self.ob, current_orders, [self.orders_passed[oid] for oid in eaten_orders]
 
 
 class PositionTracker(object):
@@ -295,8 +366,8 @@ class PositionTracker(object):
     def limit_enter(self, bid_volume, bid_price):
         return self.desk.limit_bid(bid_volume=bid_volume, bid_price=bid_price)
 
-    def market_enter(self, bid_volume, bid_price):  # TODO : review point of price here ? isnt it midpoitn ?
-        return self.desk.market_bid(bid_volume=bid_volume, bid_price=bid_price)
+    def market_enter(self, bid_volume):
+        return self.desk.market_bid(bid_volume=bid_volume)
 
     @property
     def position(self):
@@ -317,10 +388,10 @@ class PositionTracker(object):
         else:
             self.logger.warning("Attempted Exit without position...")
 
-    def market_exit(self, ask_price):  # TODO : review point of price here ? isnt it midpoitn ?
+    def market_exit(self):  # TODO : review point of price here ? isnt it midpoitn ?
         total_volume = self.position.get(self.stake_currency)
         if total_volume:
-            return self.desk.market_ask(ask_volume=total_volume, ask_price=ask_price)
+            return self.desk.market_ask(ask_volume=total_volume)
         else:
             self.logger.warning("Attempted Exit without position...")
 
@@ -594,12 +665,11 @@ class InvestSingle(MonoExchangeStrategy):
         self.logger.debug("--Strategy Tick--")
 
         # Desk can be our runtime mock, when operating without exchange...
-        current_orders, eaten_order_ids = self.desk.tick(current_orders=current_orders, eaten_orders=eaten_order_ids)
+        ob, current_orders, eaten_order_ids = self.desk.tick(current_orders=current_orders, eaten_orders=eaten_order_ids)
 
         # NOTE : we currently minimize the number of simultaneous trades, to avoid unintended tricky behavior...
 
         balance = self.primary_exchange.get_balance()
-        ob = self.primary_exchange.get_orderbook()
 
         midpoint = midpoint_lib.get_midpoint_from_orderbook(ob)
         #self.midpoints += midpoint
@@ -607,8 +677,8 @@ class InvestSingle(MonoExchangeStrategy):
         self.logger.info("Current midpoint of orderbook : " + str(midpoint))
 
         self.logger.info("Ephemeral position: " + str(self.position_tracker.position))
-        if self.position_tracker.position != self.primary_exchange.exchange_account.position:
-            self.logger.warning("Exchange position: " + str(self.primary_exchange.exchange_account.position))
+        # if self.position_tracker.position != self.primary_exchange.exchange_account.position:
+        #     self.logger.warning("Exchange position: " + str(self.primary_exchange.exchange_account.position))
 
         # Preparing to enter BET...
         def on_bear_trend():
@@ -622,7 +692,7 @@ class InvestSingle(MonoExchangeStrategy):
             if not self.position_tracker.position or (self.position_tracker.exited and not self.position_tracker.entering):
                 # Ultimately make decision
                 self.logger.info("Attempting to enter at market price...")
-                self.position_tracker.market_enter(bid_price=midpoint, bid_volume=self.base_volume)
+                self.position_tracker.market_enter(bid_volume=self.base_volume)
 
         self.market_observer.tick(midpoint,
                                   on_bull_trend=on_bull_trend,
@@ -641,7 +711,7 @@ class InvestSingle(MonoExchangeStrategy):
                 if midpoint > exit_profit_price:
                     #if midpoint is already above, exit at market !
                     self.logger.info("Attempting to exit at targetted profit price...")
-                    self.position_tracker.market_exit(midpoint)
+                    self.position_tracker.market_exit()
                 else:
                     # else exit limit
                     self.logger.info("Attempting to exit at market price...")
